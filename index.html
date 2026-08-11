@@ -1,19 +1,211 @@
-<!DOCTYPE html>
-<html lang="uz">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Zubapin Sayt</title>
-    <style>
-        body { font-family: sans-serif; background-color: #f0f2f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .container { text-align: center; background: white; padding: 50px; border-radius: 15px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
-        h1 { color: #007bff; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Zubapin Sayti Ishlamoqda!</h1>
-        <p>Muvaffaqiyatli yuklandi.</p>
-    </div>
-</body>
-</html>
+// Zubapin Telegram Bot — o'yin donati buyurtmalarini qabul qiluvchi bot
+// ISHGA TUSHIRISH:
+//   1) npm init -y && npm install telegraf
+//   2) BOT_TOKEN va ADMIN_CHAT_ID ni pastda o'zingiznikiga almashtiring
+//      (BOT_TOKEN ni @BotFather'dan oling, ADMIN_CHAT_ID ni @userinfobot orqali toping)
+//   3) node bot.js
+//   4) 24/7 ishlashi uchun VPS yoki Railway/Render kabi serverga joylashtiring
+
+const { Telegraf, Markup, session } = require('telegraf');
+const fs = require('fs');
+
+const BOT_TOKEN = '8678525192:AAEhks6vb-Gmht9lhpILWctfs1nrmHK-1bc';
+const ADMIN_CHAT_ID = '1436408777';
+const DB_FILE = './orders.json';
+
+// --- Sayt bilan bir xil o'yin/paket ma'lumotlari (real loyihada umumiy backend/DB dan olinadi) ---
+const GAMES = {
+  mlbb: { name: 'Mobile Legends: Bang Bang', fields: ['User ID', 'Server ID'],
+    packages: [
+      { amount: 'Haftalik elit pack', price: 10500 },
+      { amount: 'Oylik elit pack', price: 51000 },
+      { amount: 'Almaz propusk', price: 18266 },
+      { amount: '50+5 (+45 birinchi harid)', price: 9170 },
+      { amount: '150+15 (+135 birinchi harid)', price: 27498 },
+      { amount: '250+25 (+225 birinchi harid)', price: 44103 },
+      { amount: '500+65 (+435 birinchi harid)', price: 90597 },
+      { amount: '172 (156+16)', price: 28693 },
+      { amount: '257 (234+23)', price: 41845 },
+      { amount: '706 (625+81)', price: 115005 },
+      { amount: '2195 (1860+335)', price: 347992 },
+      { amount: '3688 (3099+589)', price: 580437 },
+      { amount: '5532 (4649+883)', price: 876744 },
+      { amount: '9288 (7740+1548)', price: 1455828 },
+    ]},
+  freefire: { name: 'Free Fire', fields: ['Player ID (UID)'],
+    packages: [
+      { amount: '100 Diamond', price: 15000 },
+      { amount: '520 Diamond', price: 72000 },
+      { amount: '1080 Diamond', price: 145000 },
+    ]},
+  pubgm: { name: 'PUBG Mobile', fields: ['Character ID'],
+    packages: [
+      { amount: '60 UC', price: 14000 },
+      { amount: '325 UC', price: 68000 },
+    ]},
+};
+const CARD_NUMBERS = [
+  { number: '4067 0700 0053 3807', holder: 'MUHAMMADJON I' },
+  { number: '9860 3501 4851 4713', holder: 'MUHAMMADJON I' },
+];
+
+// --- Oddiy fayl-asosli saqlash (real loyihada PostgreSQL/MongoDB ishlating) ---
+function loadOrders() {
+  if (!fs.existsSync(DB_FILE)) return [];
+  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+}
+function saveOrders(orders) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(orders, null, 2));
+}
+function genOrderId() {
+  return 'GV' + Date.now().toString(36).toUpperCase().slice(-6);
+}
+
+const bot = new Telegraf(BOT_TOKEN);
+bot.use(session());
+bot.use((ctx, next) => { ctx.session ??= {}; return next(); });
+
+// --- /start: o'yin tanlash ---
+bot.start((ctx) => {
+  ctx.session = {};
+  const buttons = Object.entries(GAMES).map(([id, g]) => [Markup.button.callback(g.name, `game_${id}`)]);
+  ctx.reply(
+    `👋 Zubapin botiga xush kelibsiz!\n\nO'yiningizni tanlang va bir necha daqiqada donat qiling:`,
+    Markup.inlineKeyboard(buttons)
+  );
+});
+
+// --- O'yin tanlandi -> ID maydonlarini so'rash ---
+bot.action(/game_(.+)/, async (ctx) => {
+  const gameId = ctx.match[1];
+  ctx.session.gameId = gameId;
+  ctx.session.fieldValues = [];
+  ctx.session.step = 'fields';
+  await ctx.answerCbQuery();
+  await ctx.reply(`✏️ ${GAMES[gameId].fields[0]} ni kiriting:`);
+});
+
+// --- Matn xabarlar: ID kiritish yoki chek raqami ---
+bot.on('text', async (ctx) => {
+  const s = ctx.session;
+  if (!s.gameId) return ctx.reply('Iltimos /start bosing.');
+
+  const game = GAMES[s.gameId];
+
+  if (s.step === 'fields') {
+    s.fieldValues.push(ctx.message.text.trim());
+    if (s.fieldValues.length < game.fields.length) {
+      return ctx.reply(`✏️ ${game.fields[s.fieldValues.length]} ni kiriting:`);
+    }
+    // Barcha maydonlar to'ldirildi -> paket tanlash
+    s.step = 'package';
+    const buttons = game.packages.map((p, i) =>
+      [Markup.button.callback(`${p.amount} — ${p.price.toLocaleString()} so'm`, `pkg_${i}`)]);
+    return ctx.reply('💎 Paketni tanlang:', Markup.inlineKeyboard(buttons));
+  }
+
+  if (s.step === 'awaiting_receipt') {
+    s.receiptCode = ctx.message.text.trim();
+    const orders = loadOrders();
+    const order = {
+      orderId: genOrderId(),
+      gameName: game.name,
+      fieldLabels: game.fields,
+      fieldValues: s.fieldValues,
+      pkgAmount: s.pkg.amount,
+      price: s.pkg.price,
+      receiptCode: s.receiptCode,
+      telegramUser: ctx.from.username || ctx.from.id,
+      status: 'kutilmoqda',
+      createdAt: Date.now(),
+    };
+    orders.push(order);
+    saveOrders(orders);
+
+    await ctx.reply(
+      `✅ Buyurtmangiz qabul qilindi!\n\n🆔 Buyurtma raqami: ${order.orderId}\n` +
+      `Admin tekshiruvidan so'ng ${game.name} hisobingizga ${order.pkgAmount} tushadi.\n` +
+      `Holatni /status ${order.orderId} orqali tekshirishingiz mumkin.`
+    );
+
+    // Adminga bildirishnoma
+    if (ADMIN_CHAT_ID !== 'BU_YERGA_ADMIN_TELEGRAM_ID_NI_QOYING') {
+      bot.telegram.sendMessage(ADMIN_CHAT_ID,
+        `🆕 Yangi buyurtma!\n\n` +
+        `ID: ${order.orderId}\nO'yin: ${order.gameName}\n` +
+        `${game.fields.map((f,i)=>`${f}: ${order.fieldValues[i]}`).join('\n')}\n` +
+        `Paket: ${order.pkgAmount}\nNarx: ${order.price.toLocaleString()} so'm\n` +
+        `Chek: ${order.receiptCode}\nFoydalanuvchi: @${order.telegramUser}`
+      );
+    }
+    ctx.session = {};
+    return;
+  }
+});
+
+// --- Paket tanlandi -> to'lov ma'lumotlarini ko'rsatish ---
+bot.action(/pkg_(\d+)/, async (ctx) => {
+  const s = ctx.session;
+  const game = GAMES[s.gameId];
+  const pkg = game.packages[parseInt(ctx.match[1])];
+  s.pkg = pkg;
+  s.step = 'awaiting_receipt';
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `💳 To'lov uchun quyidagi kartaga ${pkg.price.toLocaleString()} so'm o'tkazing:\n\n` +
+    `\`${CARD_NUMBERS.map(c => c.number + ' (' + c.holder + ')').join('\n')}\`\n\n` +
+    `To'lovdan so'ng chek raqami yoki tranzaksiya kodini shu yerga yozing:`,
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// --- Buyurtma holatini tekshirish ---
+bot.command('status', (ctx) => {
+  const parts = ctx.message.text.split(' ');
+  if (parts.length < 2) return ctx.reply('Foydalanish: /status GV123ABC');
+  const orders = loadOrders();
+  const order = orders.find(o => o.orderId === parts[1].toUpperCase());
+  if (!order) return ctx.reply('Bunday buyurtma topilmadi.');
+  const statusText = { kutilmoqda: 'Kutilmoqda ⏳', tolandi: "To'landi 💰", bajarildi: 'Bajarildi ✅', bekor: 'Bekor qilindi ❌' };
+  ctx.reply(`Buyurtma ${order.orderId}\nHolat: ${statusText[order.status] || order.status}`);
+});
+
+// --- ADMIN buyruqlari (faqat ADMIN_CHAT_ID dan ishlaydi) ---
+bot.command('admin_orders', (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return;
+  const orders = loadOrders().filter(o => o.status === 'kutilmoqda');
+  if (orders.length === 0) return ctx.reply('Kutilayotgan buyurtmalar yo\'q.');
+  orders.forEach(o => {
+    ctx.reply(
+      `${o.orderId} — ${o.gameName} — ${o.pkgAmount} — ${o.price.toLocaleString()} so'm\nChek: ${o.receiptCode}`,
+      Markup.inlineKeyboard([
+        Markup.button.callback('✅ Tasdiqlash', `confirm_${o.orderId}`),
+        Markup.button.callback('❌ Bekor qilish', `cancel_${o.orderId}`),
+      ])
+    );
+  });
+});
+
+bot.action(/confirm_(.+)/, (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return ctx.answerCbQuery();
+  const orders = loadOrders();
+  const order = orders.find(o => o.orderId === ctx.match[1]);
+  if (order) { order.status = 'bajarildi'; saveOrders(orders); }
+  ctx.answerCbQuery('Tasdiqlandi');
+  ctx.editMessageText(`✅ ${order.orderId} — bajarildi deb belgilandi.`);
+});
+
+bot.action(/cancel_(.+)/, (ctx) => {
+  if (String(ctx.from.id) !== String(ADMIN_CHAT_ID)) return ctx.answerCbQuery();
+  const orders = loadOrders();
+  const order = orders.find(o => o.orderId === ctx.match[1]);
+  if (order) { order.status = 'bekor'; saveOrders(orders); }
+  ctx.answerCbQuery('Bekor qilindi');
+  ctx.editMessageText(`❌ ${order.orderId} — bekor qilindi.`);
+});
+
+bot.launch();
+console.log('Zubapin bot ishga tushdi...');
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
